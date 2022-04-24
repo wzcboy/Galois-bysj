@@ -82,9 +82,9 @@ public:
       double delta_leaf = delta[leaf];
       auto& succ_list   = succ[leaf];
 
-      for (auto succ = succ_list.begin(), succ_end = succ_list.end();
-           succ != succ_end; ++succ) {
-        delta_leaf += (sigma_leaf / sigma[*succ]) * (1.0 + delta[*succ]);
+      for (auto succ_iter = succ_list.begin(), succ_end = succ_list.end();
+           succ_iter != succ_end; ++succ_iter) {
+        delta_leaf += (sigma_leaf / sigma[*succ_iter]) * (1.0 + delta[*succ_iter]);
       }
       delta[leaf] = delta_leaf;
     }
@@ -133,6 +133,16 @@ public:
         galois::loopname("Main"));
   }
 
+  template <typename Cont>
+  void runBySchedule(const Cont& v) {
+    typedef galois::worklists::ChunkFIFO<64> WL;
+    // Each thread works on an individual source node
+    galois::for_each(
+        galois::iterate(v),
+        [&](const OuterGNode& curSource, auto& ctx) { doBC(curSource); },
+        galois::loopname("Main"), galois::no_pushes(), galois::disable_conflict_detection(),
+        galois::no_stats(), galois::wl<WL>());
+  }
   /**
    * Verification for reference torus graph inputs.
    * All nodes should have the same betweenness value up to
@@ -332,7 +342,8 @@ void doOuterBC() {
   if (numOfSources > 0) {
     bcOuter.runAll(numOfSources);
   } else {
-    bcOuter.run(v);
+    // bcOuter.run(v);
+    bcOuter.runBySchedule(v);
   }
   execTime.stop();
 

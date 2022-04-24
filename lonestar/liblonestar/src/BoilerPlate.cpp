@@ -41,6 +41,15 @@ llvm::cl::opt<bool>
                    llvm::cl::desc("Specify that the input graph is symmetric"),
                    llvm::cl::init(false));
 
+llvm::cl::opt<std::string>
+    outputLocation("outputLocation",
+                   llvm::cl::desc("Location (directory) to write results"));
+
+llvm::cl::opt<bool>
+    outputToFile("outputToFile",
+                   llvm::cl::desc("Write result (default false)"),
+                   llvm::cl::init(false));
+
 static void LonestarPrintVersion(llvm::raw_ostream& out) {
   out << "LoneStar Benchmark Suite v" << galois::getVersion() << " ("
       << galois::getRevision() << ")\n";

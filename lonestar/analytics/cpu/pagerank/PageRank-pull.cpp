@@ -26,14 +26,19 @@
 #include "galois/graphs/TypeTraits.h"
 #include "galois/gstl.h"
 
+#include <boost/filesystem.hpp>
+
 const char* desc =
     "Computes page ranks a la Page and Brin. This is a pull-style algorithm.";
 
-enum Algo { Topo = 0, Residual };
+enum Algo { Topo = 0, Residual, TopoSchedule, SerTopo, TopoPriority };
 
 static cll::opt<Algo> algo("algo", cll::desc("Choose an algorithm:"),
                            cll::values(clEnumVal(Topo, "Topological"),
-                                       clEnumVal(Residual, "Residual")),
+                                       clEnumVal(Residual, "Residual"),
+                                       clEnumVal(TopoSchedule, "TopoSchedule"),
+                                       clEnumVal(SerTopo, "SerTopo"),
+                                       clEnumVal(TopoPriority, "TopoPriority")),
                            cll::init(Residual));
 
 //! Flag that forces user to be aware that they should be passing in a
@@ -48,6 +53,7 @@ constexpr static const unsigned CHUNK_SIZE = 32;
 struct LNode {
   PRTy value;
   uint32_t nout;
+  float diff;
 };
 
 typedef galois::graphs::LC_CSR_Graph<LNode, void>::with_no_lockable<
@@ -66,6 +72,7 @@ void initNodeDataTopological(Graph& g) {
         auto& sdata = g.getData(n, galois::MethodFlag::UNPROTECTED);
         sdata.value = init_value;
         sdata.nout  = 0;
+        sdata.diff = 0;
       },
       galois::no_stats(), galois::loopname("initNodeData"));
 }
@@ -79,6 +86,7 @@ void initNodeDataResidual(Graph& g, DeltaArray& delta,
         auto& sdata = g.getData(n, galois::MethodFlag::UNPROTECTED);
         sdata.value = 0;
         sdata.nout  = 0;
+        sdata.diff  = 0;
         delta[n]    = 0;
         residual[n] = INIT_RESIDUAL;
       },
@@ -183,12 +191,211 @@ void computePRResidual(Graph& graph, DeltaArray& delta,
   } ///< End while(true).
     //! [scalarreduction]
 
+  galois::runtime::reportStat_Single("PageRank", "Rounds", iterations);
+
   if (iterations >= maxIterations) {
     std::cerr << "ERROR: failed to converge in " << iterations
               << " iterations\n";
   }
+
 }
 
+void computePRTopoSchedule(Graph& graph) {
+  unsigned int iteration = 0;
+  galois::GAccumulator<float> accum;
+
+  typedef galois::worklists::PerThreadChunkFIFO<CHUNK_SIZE> WL;
+
+  float base_score = (1.0f - ALPHA) / graph.size();
+  while (true) {
+    galois::for_each(
+        galois::iterate(graph),
+        [&](const GNode& src, auto& ctx) {
+          constexpr const galois::MethodFlag flag =
+              galois::MethodFlag::UNPROTECTED;
+
+          LNode& sdata = graph.getData(src, flag);
+          float sum    = 0.0;
+
+          for (auto jj = graph.edge_begin(src, flag),
+                    ej = graph.edge_end(src, flag);
+               jj != ej; ++jj) {
+            GNode dst = graph.getEdgeDst(jj);
+
+            LNode& ddata = graph.getData(dst, flag);
+            sum += ddata.value / ddata.nout;
+          }
+
+          //! New value of pagerank after computing contributions from
+          //! incoming edges in the original graph.
+          float value = sum * ALPHA + base_score;
+          //! Find the delta in new and old pagerank values.
+          float diff = std::fabs(value - sdata.value);
+
+          //! Do not update pagerank before the diff is computed since
+          //! there is a data dependence on the pagerank value.
+          sdata.value = value;
+          accum += diff;
+        },
+        galois::no_stats(), galois::disable_conflict_detection(), galois::no_pushes(),
+        galois::loopname("PageRank"), galois::wl<WL>());
+
+#if DEBUG
+    std::cout << "iteration: " << iteration << " max delta: " << delta << "\n";
+#endif
+
+    iteration += 1;
+    if (accum.reduce() <= tolerance || iteration >= maxIterations) {
+      break;
+    }
+    accum.reset();
+
+  } ///< End while(true).
+
+  galois::runtime::reportStat_Single("PageRank", "Rounds", iteration);
+  if (iteration >= maxIterations) {
+    std::cerr << "ERROR: failed to converge in " << iteration
+              << " iterations\n";
+  }
+}
+
+void serComputePRTopological(Graph& graph) {
+  unsigned int iteration = 0;
+  float accum = 0;
+  galois::StdForEach loop;
+
+  float base_score = (1.0f - ALPHA) / graph.size();
+  while (true) {
+    loop(
+        galois::iterate(graph),
+        [&](const GNode& src) {
+          constexpr const galois::MethodFlag flag =
+              galois::MethodFlag::UNPROTECTED;
+
+          LNode& sdata = graph.getData(src, flag);
+          float sum    = 0.0;
+
+          for (auto jj = graph.edge_begin(src, flag),
+                    ej = graph.edge_end(src, flag);
+               jj != ej; ++jj) {
+            GNode dst = graph.getEdgeDst(jj);
+
+            LNode& ddata = graph.getData(dst, flag);
+            sum += ddata.value / ddata.nout;
+          }
+
+          //! New value of pagerank after computing contributions from
+          //! incoming edges in the original graph.
+          float value = sum * ALPHA + base_score;
+          //! Find the delta in new and old pagerank values.
+          float diff = std::fabs(value - sdata.value);
+
+          //! Do not update pagerank before the diff is computed since
+          //! there is a data dependence on the pagerank value.
+          sdata.value = value;
+          accum += diff;
+        },
+        galois::loopname("PageRank"));
+
+    iteration += 1;
+    if (accum <= tolerance || iteration >= maxIterations) {
+      break;
+    }
+    accum = 0;
+
+  } ///< End while(true).
+
+  galois::runtime::reportStat_Single("PageRank", "Rounds", iteration);
+  if (iteration >= maxIterations) {
+    std::cerr << "ERROR: failed to converge in " << iteration
+              << " iterations\n";
+  }
+}
+
+// Work items for the OBIM PageRank
+struct PageRankWorkItem {
+  uint32_t nodeID;
+  float diff;
+  PageRankWorkItem() : nodeID(0), diff(0){};
+  PageRankWorkItem(uint32_t _node, float _diff) : nodeID(_node), diff(_diff) {};
+};
+
+struct  PRWorkItemIndexer {
+  uint32_t operator() (const PageRankWorkItem& item) {
+    return static_cast<uint32_t> (1 / item.diff);
+  }
+};
+
+namespace gwl = galois::worklists;
+using PSchunk = gwl::PerSocketChunkFIFO<CHUNK_SIZE>;
+using OBIM    = gwl::OrderedByIntegerMetric<PRWorkItemIndexer, PSchunk>;
+
+void computePRTopoPriority(Graph& graph) {
+  unsigned int iteration = 0;
+  galois::GAccumulator<float> accum;
+
+  float base_score = (1.0F - ALPHA) / graph.size();
+
+  galois::InsertBag<PageRankWorkItem> activeNodes;
+
+  while (true) {
+
+    galois::do_all(
+        galois::iterate(graph),
+        [&](const GNode& src) {
+          auto& sdata = graph.getData(src);
+          activeNodes.push(PageRankWorkItem(src, sdata.diff));
+        });
+
+    galois::for_each(
+        galois::iterate(activeNodes),
+        [&](const PageRankWorkItem& item, auto& ctx) {
+          constexpr const galois::MethodFlag flag =
+              galois::MethodFlag::UNPROTECTED;
+
+          GNode src = item.nodeID;
+          LNode& sdata = graph.getData(src, flag);
+          float sum    = 0.0;
+
+          for (auto jj = graph.edge_begin(src, flag),
+                    ej = graph.edge_end(src, flag);
+               jj != ej; ++jj) {
+            GNode dst = graph.getEdgeDst(jj);
+
+            LNode& ddata = graph.getData(dst, flag);
+            sum += ddata.value / ddata.nout;
+          }
+
+          //! New value of pagerank after computing contributions from
+          //! incoming edges in the original graph.
+          float value = sum * ALPHA + base_score;
+          //! Find the delta in new and old pagerank values.
+          float diff = std::fabs(value - sdata.value);
+
+          //! Do not update pagerank before the diff is computed since
+          //! there is a data dependence on the pagerank value.
+          sdata.value = value;
+          sdata.diff  = diff;
+          accum += diff;
+        },
+        galois::loopname("PageRank"), galois::disable_conflict_detection(), galois::no_pushes(),
+        galois::wl<OBIM>(PRWorkItemIndexer()));
+
+    iteration += 1;
+    if (accum.reduce() <= tolerance || iteration >= maxIterations) {
+      break;
+    }
+    activeNodes.clear();
+    accum.reset();
+
+  } ///< End while(true).
+
+  galois::runtime::reportStat_Single("PageRank", "Rounds", iteration);
+  if (iteration >= maxIterations) {
+    std::cerr << "ERROR: failed to converge in " << iteration
+              << " iterations\n";
+  }
+}
 /**
  * PageRank pull topological.
  * Always calculate the new pagerank for each iteration.
@@ -250,6 +457,16 @@ void computePRTopological(Graph& graph) {
   }
 }
 
+void prTopoSerial(Graph& graph) {
+  initNodeDataTopological(graph);
+  computeOutDeg(graph);
+
+  galois::StatTimer execTime("Timer_0");
+  execTime.start();
+  serComputePRTopological(graph);
+  execTime.stop();
+}
+
 void prTopological(Graph& graph) {
   initNodeDataTopological(graph);
   computeOutDeg(graph);
@@ -273,6 +490,46 @@ void prResidual(Graph& graph) {
   execTime.start();
   computePRResidual(graph, delta, residual);
   execTime.stop();
+}
+
+void prTopoSchedule(Graph& graph) {
+  initNodeDataTopological(graph);
+  computeOutDeg(graph);
+
+  galois::StatTimer execTime("Timer_0");
+  execTime.start();
+  computePRTopoSchedule(graph);
+  execTime.stop();
+}
+
+void prTopoPriority(Graph& graph) {
+  initNodeDataTopological(graph);
+  computeOutDeg(graph);
+
+  galois::StatTimer execTime("Timer_0");
+  execTime.start();
+  computePRTopoPriority(graph);
+  execTime.stop();
+}
+
+void writeOutput(const std::string& output_dir, Graph& graph, std::string ouput_filename="output") {
+  namespace fs = boost::filesystem;
+  fs::path filename{output_dir};
+  filename = filename.append(ouput_filename);
+
+  std::ofstream outputFile(filename.string().c_str());
+
+  if (!outputFile) {
+    std::cerr << "could not open file: " << filename << std::endl;
+  }
+
+  for(size_t i = 0; i< graph.size(); ++i) {
+    outputFile << i << " " << std::to_string(graph.getData(i).value) << std::endl;
+  }
+
+  if (!outputFile) {
+    std::cerr << "failed tp write file: " << filename << std::endl;
+  }
 }
 
 int main(int argc, char** argv) {
@@ -313,6 +570,21 @@ int main(int argc, char** argv) {
     std::cout << "Running Pull Residual version, tolerance:" << tolerance
               << ", maxIterations:" << maxIterations << "\n";
     prResidual(transposeGraph);
+    break;
+  case TopoSchedule:
+    std::cout << "Running Pull Topological Schedule version, tolerance:" << tolerance
+              << ", maxIterations:" << maxIterations << "\n";
+    prTopoSchedule(transposeGraph);
+    break;
+  case SerTopo:
+    std::cout << "Running Pull Topological serial version, tolerance:" << tolerance
+              << ", maxIterations:" << maxIterations << "\n";
+    prTopoSerial(transposeGraph);
+    break;
+  case TopoPriority:
+    std::cout << "Running Pull Topological Priority version, tolerance:" << tolerance
+              << ", maxIterations:" << maxIterations << "\n";
+    prTopoPriority(transposeGraph);
     break;
   default:
     std::abort();
@@ -355,6 +627,10 @@ int main(int argc, char** argv) {
 #if DEBUG
   printPageRank(transposeGraph);
 #endif
+
+  if (outputToFile) {
+    writeOutput(outputLocation, transposeGraph);
+  }
 
   totalTime.stop();
 

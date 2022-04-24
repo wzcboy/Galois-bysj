@@ -77,6 +77,7 @@ if (TARGET Boost::Boost)
 else()
   # Standard CMake Boost module
   target_link_libraries(galois_shmem PUBLIC Boost::boost)
+  target_link_libraries(galois_shmem PUBLIC Boost::filesystem)
 endif()
 
 if (SCHED_SETAFFINITY_FOUND)

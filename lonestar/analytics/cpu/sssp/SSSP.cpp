@@ -30,6 +30,7 @@
 
 #include "llvm/Support/CommandLine.h"
 
+#include <omp.h>
 #include <iostream>
 
 namespace cll = llvm::cl;
@@ -63,15 +64,21 @@ enum Algo {
   serDelta,
   dijkstraTile,
   dijkstra,
+  parallelDijkstra,
   topo,
+  serSPFA,
+  BellmanFord,
+  serBellmanFord,
   topoTile,
-  AutoAlgo
+  AutoAlgo,
+  topoOmp
 };
 
 const char* const ALGO_NAMES[] = {
     "deltaTile", "deltaStep",    "deltaStepBarrier", "serDeltaTile",
-    "serDelta",  "dijkstraTile", "dijkstra",         "topo",
-    "topoTile",  "Auto"};
+    "serDelta",  "dijkstraTile", "dijkstra",         "parallelDijkstra",
+    "topo",      "serSPFA",   "BellmanFord", "serBellmanFord",
+    "topoTile", "Auto", "topoOmp"};
 
 static cll::opt<Algo> algo(
     "algo", cll::desc("Choose an algorithm (default value auto):"),
@@ -81,10 +88,15 @@ static cll::opt<Algo> algo(
                 clEnumVal(serDeltaTile, "serDeltaTile"),
                 clEnumVal(serDelta, "serDelta"),
                 clEnumVal(dijkstraTile, "dijkstraTile"),
-                clEnumVal(dijkstra, "dijkstra"), clEnumVal(topo, "topo"),
+                clEnumVal(dijkstra, "dijkstra"),
+                clEnumVal(parallelDijkstra, "parallelDijkstra"),
+                clEnumVal(topo, "topo"),
+                clEnumVal(serSPFA, "serSPFA"),
+                clEnumVal(BellmanFord, "BellmanFord"),
+                clEnumVal(serBellmanFord, "serBellmanFord"),
                 clEnumVal(topoTile, "topoTile"),
-                clEnumVal(AutoAlgo,
-                          "auto: choose among the algorithms automatically")),
+                clEnumVal(AutoAlgo, "auto: choose among the algorithms automatically"),
+                clEnumVal(topoOmp, "topoOmp")),
     cll::init(AutoAlgo));
 
 //! [withnumaalloc]
@@ -115,6 +127,7 @@ using OBIM_Barrier =
     gwl::OrderedByIntegerMetric<UpdateRequestIndexer,
                                 PSchunk>::with_barrier<true>::type;
 
+//! OrderedByMetric FIFO -parallel
 template <typename T, typename OBIMTy = OBIM, typename P, typename R>
 void deltaStepAlgo(Graph& graph, GNode source, const P& pushWrap,
                    const R& edgeRange) {
@@ -172,6 +185,7 @@ void deltaStepAlgo(Graph& graph, GNode source, const P& pushWrap,
   }
 }
 
+//! OrderedByMetric FIFO -serial
 template <typename T, typename P, typename R>
 void serDeltaAlgo(Graph& graph, const GNode& source, const P& pushWrap,
                   const R& edgeRange) {
@@ -220,6 +234,52 @@ void serDeltaAlgo(Graph& graph, const GNode& source, const P& pushWrap,
   galois::runtime::reportStat_Single("SSSP-Serial-Delta", "Iterations", iter);
 }
 
+//! Ordered(a.dist < b.dist) -parallel
+template <typename T, typename P, typename R>
+void parallelDijkstraAlgo(Graph& graph, const GNode& source, const P& pushWrap,
+                  const R& edgeRange) {
+
+  using WL = galois::MinHeap<T>;
+
+  graph.getData(source) = 0;
+
+  WL wl;
+  pushWrap(wl, source, 0);
+
+  size_t iter = 0;
+
+  while (!wl.empty()) {
+    ++iter;
+
+    T item = wl.pop();
+
+    if (graph.getData(item.src) < item.dist) {
+      // empty work
+      continue;
+    }
+
+    galois::do_all(
+        galois::iterate(graph.edge_begin(item.src, galois::MethodFlag::UNPROTECTED),
+                        graph.edge_end(item.src, galois::MethodFlag::UNPROTECTED)),
+        [&](auto e) {
+
+          GNode dst   = graph.getEdgeDst(e);
+          auto& ddata = graph.getData(dst);
+
+          const auto newDist = item.dist + graph.getEdgeData(e);
+
+          Dist oldDist = galois::atomicMin<uint32_t>(ddata, newDist);
+          if (newDist < oldDist) {
+            pushWrap(wl, dst, newDist);
+          }
+        },
+        galois::no_stats(), galois::loopname("parallel-SSSP-Dijkstra"));
+  }
+
+  galois::runtime::reportStat_Single("SSSP-Dijkstra", "Iterations", iter);
+}
+
+//! Ordered(a.dist < b.dist) -serial
 template <typename T, typename P, typename R>
 void dijkstraAlgo(Graph& graph, const GNode& source, const P& pushWrap,
                   const R& edgeRange) {
@@ -260,6 +320,8 @@ void dijkstraAlgo(Graph& graph, const GNode& source, const P& pushWrap,
   galois::runtime::reportStat_Single("SSSP-Dijkstra", "Iterations", iter);
 }
 
+//! Work-stealing PerThreadChunkFIFO -parallel
+//! if no galois::steal(): PerThreadChunkFIFO -parallel
 void topoAlgo(Graph& graph, const GNode& source) {
 
   galois::LargeArray<Dist> oldDist;
@@ -306,6 +368,58 @@ void topoAlgo(Graph& graph, const GNode& source) {
   galois::runtime::reportStat_Single("SSSP-topo", "rounds", rounds);
 }
 
+//! FIFO -serial
+//! Time complexity: O(kE)
+void serSPFAAlgo(Graph& graph, const GNode& source) {
+
+  galois::LargeArray<Dist> oldDist;
+  oldDist.allocateInterleaved(graph.size());
+
+  constexpr Dist INFTY = SSSP::DIST_INFINITY;
+  galois::do_all(
+      galois::iterate(size_t{0}, graph.size()),
+      [&](size_t i) { oldDist.constructAt(i, INFTY); }, galois::no_stats(),
+      galois::loopname("initDistArray"));
+
+  graph.getData(source) = 0;
+
+  galois::GReduceLogicalOr changed;
+  size_t rounds = 0;
+
+  galois::StdForEach loop;
+
+  do {
+
+    ++rounds;
+    changed.reset();
+
+    loop(
+        galois::iterate(graph),
+        [&](const GNode& n) {
+          const auto& sdata = graph.getData(n);
+
+          if (oldDist[n] > sdata) {
+
+            oldDist[n] = sdata;
+            changed.update(true);
+
+            for (auto e : graph.edges(n)) {
+              const auto newDist = sdata + graph.getEdgeData(e);
+              auto dst           = graph.getEdgeDst(e);
+              auto& ddata        = graph.getData(dst);
+              if (newDist < ddata) {
+                ddata = newDist;
+              }
+            }
+          }
+        },
+        galois::loopname("Update"));
+
+  } while (changed.reduce());
+
+  galois::runtime::reportStat_Single("SSSP-SPFA-Serial", "rounds", rounds);
+}
+
 void topoTileAlgo(Graph& graph, const GNode& source) {
 
   galois::InsertBag<SrcEdgeTile> tiles;
@@ -350,6 +464,107 @@ void topoTileAlgo(Graph& graph, const GNode& source) {
   } while (changed.reduce());
 
   galois::runtime::reportStat_Single("SSSP-topo", "rounds", rounds);
+}
+
+void topoOmpAlgo(Graph& graph, const GNode& source, int numOfThreads) {
+
+  galois::LargeArray<Dist> oldDist;
+  oldDist.allocateInterleaved(graph.size());
+
+  constexpr Dist INFTY = SSSP::DIST_INFINITY;
+  galois::do_all(
+      galois::iterate(size_t{0}, graph.size()),
+      [&](size_t i) { oldDist.constructAt(i, INFTY); }, galois::no_stats(),
+      galois::loopname("initDistArray"));
+
+  graph.getData(source) = 0;
+
+  bool changed = false;
+  size_t rounds = 0;
+
+  omp_set_num_threads(numOfThreads);
+
+  do {
+
+    ++rounds;
+    changed = false;
+
+    #pragma omp parallel for schedule(static, CHUNK_SIZE)
+    for (auto it = graph.begin(); it < graph.end(); ++it) {
+      GNode n = *it;
+      const auto& sdata = graph.getData(n);
+
+      if (oldDist[n] > sdata) {
+
+        oldDist[n] = sdata;
+        #pragma omp atomic
+          changed |= true;
+
+        for (auto e : graph.edges(n)) {
+          const auto newDist = sdata + graph.getEdgeData(e);
+          auto dst           = graph.getEdgeDst(e);
+          auto& ddata        = graph.getData(dst);
+          galois::atomicMin(ddata, newDist);
+        }
+      }
+    }
+
+  } while (changed);
+
+  galois::runtime::reportStat_Single("SSSP-topo-omp", "rounds", rounds);
+}
+
+void serBellmanFordAlgo(Graph& graph, const GNode& source) {
+  graph.getData(source) = 0;
+
+  size_t rounds = 0;
+
+  galois::StdForEach loop;
+
+  for (unsigned i = 0; i< (graph.size() - 1); ++i) {
+    ++rounds;
+
+    loop(
+        galois::iterate(graph),
+        [&](const GNode& n) {
+          const auto& sdata = graph.getData(n);
+          for (auto e : graph.edges(n)) {
+            const auto newDist= sdata + graph.getEdgeData(e);
+            auto dst= graph.getEdgeDst(e);
+            auto& ddata       = graph.getData(dst);
+            if ( newDist < ddata) {
+              ddata = newDist;
+            }
+          }
+        },
+        galois::loopname("Update"));
+  }
+  galois::runtime::reportStat_Single("SSSP-serBellmanFord", "rounds", rounds);
+}
+
+void BellmanFordAlgo(Graph& graph, const GNode& source) {
+  graph.getData(source) = 0;
+
+  size_t rounds = 0;
+
+  for (unsigned i = 0; i< (graph.size() - 1); ++i) {
+    ++rounds;
+
+    galois::do_all(
+        galois::iterate(graph),
+        [&](const GNode& n) {
+          const auto& sdata = graph.getData(n);
+
+          for (auto e : graph.edges(n)) {
+            const auto newDist = sdata + graph.getEdgeData(e);
+            auto dst          = graph.getEdgeDst(e);
+            auto& ddata       = graph.getData(dst);
+            galois::atomicMin(ddata, newDist);
+          }
+        },
+        galois::loopname("Update"));
+  }
+  galois::runtime::reportStat_Single("SSSP-BellmanFord", "rounds", rounds);
 }
 
 int main(int argc, char** argv) {
@@ -443,13 +658,28 @@ int main(int argc, char** argv) {
     dijkstraAlgo<UpdateRequest>(graph, source, ReqPushWrap(),
                                 OutEdgeRangeFn{graph});
     break;
+  case parallelDijkstra:
+    parallelDijkstraAlgo<UpdateRequest>(graph, source, ReqPushWrap(),
+                                OutEdgeRangeFn{graph});
+    break;
   case topo:
     topoAlgo(graph, source);
+    break;
+  case serSPFA:
+    serSPFAAlgo(graph, source);
+    break;
+  case BellmanFord:
+    BellmanFordAlgo(graph, source);
+    break;
+  case serBellmanFord:
+    serBellmanFordAlgo(graph, source);
     break;
   case topoTile:
     topoTileAlgo(graph, source);
     break;
-
+  case topoOmp:
+    topoOmpAlgo(graph, source, numThreads);
+    break;
   case deltaStepBarrier:
     deltaStepAlgo<UpdateRequest, OBIM_Barrier>(graph, source, ReqPushWrap(),
                                                OutEdgeRangeFn{graph});

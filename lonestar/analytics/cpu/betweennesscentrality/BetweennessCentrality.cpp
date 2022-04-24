@@ -25,9 +25,9 @@
 
 constexpr static const char* const REGION_NAME = "BC";
 
-enum Algo { Level = 0, Async, Outer, AutoAlgo };
+enum Algo { Level = 0, Async, Outer, Serial, AutoAlgo };
 
-const char* const ALGO_NAMES[] = {"Level", "Async", "Outer", "Auto"};
+const char* const ALGO_NAMES[] = {"Level", "Async", "Outer", "Serial", "Auto"};
 
 const uint32_t infinity = std::numeric_limits<uint32_t>::max() / 4;
 
@@ -76,6 +76,7 @@ static cll::opt<Algo> algo(
     "algo", cll::desc("Choose an algorithm (default value AutoAlgo):"),
     cll::values(clEnumVal(Level, "Level"), clEnumVal(Async, "Async"),
                 clEnumVal(Outer, "Outer"),
+                clEnumVal(Serial, "Serial"),
                 clEnumVal(AutoAlgo,
                           "Auto: choose among the algorithms automatically")),
     cll::init(AutoAlgo));
@@ -96,7 +97,7 @@ static const char* desc = "Computes betwenness centrality in an unweighted "
 #include "LevelStructs.h"
 #include "AsyncStructs.h"
 #include "OuterStructs.h"
-
+#include "SerialBC.h"
 ////////////////////////////////////////////////////////////////////////////////
 
 int main(int argc, char** argv) {
@@ -136,6 +137,11 @@ int main(int argc, char** argv) {
     // see OuterStructs.h
     galois::gInfo("Running outer BC");
     doOuterBC();
+    break;
+  case Serial:
+    // see SerialBC.h
+    galois::gInfo("Running serial BC");
+    doSerialBC();
     break;
   default:
     GALOIS_DIE("Unknown BC algorithm type");

@@ -30,6 +30,10 @@ extern llvm::cl::opt<int> numThreads;
 extern llvm::cl::opt<std::string> statFile;
 extern llvm::cl::opt<bool> symmetricGraph;
 
+//! Where to write output if output is set
+extern llvm::cl::opt<std::string> outputLocation;
+extern llvm::cl::opt<bool> outputToFile;
+
 //! initialize lonestar benchmark
 void LonestarStart(int argc, char** argv, const char* app, const char* desc,
                    const char* url, llvm::cl::opt<std::string>* input);

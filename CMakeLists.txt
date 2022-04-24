@@ -79,7 +79,7 @@ if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
   add_compile_options("$<$<COMPILE_LANGUAGE:CXX>:-Wall;-Wextra>")
 
   if(CMAKE_CXX_COMPILER_VERSION VERSION_LESS 11)
-    add_compile_options("$<$<COMPILE_LANGUAGE:CXX>:-Werror>")
+    add_compile_options("$<$<COMPILE_LANGUAGE:CXX>:-Werror>;-Wno-error=unused-parameter;-Wno-error=unused-variable;")
   endif()
 endif()
 
@@ -152,7 +152,7 @@ if(NOT HAVE_HUGEPAGES AND GALOIS_STRICT_CONFIG)
   message(FATAL_ERROR "Need huge pages")
 endif()
 
-find_package(Boost 1.58.0 REQUIRED COMPONENTS serialization iostreams)
+find_package(Boost 1.58.0 REQUIRED COMPONENTS filesystem serialization iostreams)
 
 find_package(LLVM REQUIRED CONFIG)
 if("${LLVM_PACKAGE_VERSION}" VERSION_LESS "7")
@@ -169,6 +169,14 @@ target_include_directories(LLVMSupport INTERFACE ${LLVM_INCLUDE_DIRS})
 include(HandleSanitizer)
 
 include(CheckEndian)
+
+find_package(OpenMP REQUIRED)
+if(OPENMP_FOUND)
+  message("OPENMP FOUND")
+  set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} ${OpenMP_C_FLAGS}")
+  set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} ${OpenMP_CXX_FLAGS}")
+  set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} ${OpenMP_EXE_LINKER_FLAGS}")
+endif()
 
 ###### Test Inputs ######
 
