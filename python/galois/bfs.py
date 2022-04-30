@@ -1,1 +1,1 @@
-from ._bfs import *
+from galois._bfs import *
