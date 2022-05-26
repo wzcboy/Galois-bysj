@@ -71,14 +71,15 @@ enum Algo {
   serBellmanFord,
   topoTile,
   AutoAlgo,
-  topoOmp
+  topoOmp,
+  dataDriven,
 };
 
 const char* const ALGO_NAMES[] = {
     "deltaTile", "deltaStep",    "deltaStepBarrier", "serDeltaTile",
     "serDelta",  "dijkstraTile", "dijkstra",         "parallelDijkstra",
     "topo",      "serSPFA",   "BellmanFord", "serBellmanFord",
-    "topoTile", "Auto", "topoOmp"};
+    "topoTile", "Auto", "topoOmp", "dataDriven"};
 
 static cll::opt<Algo> algo(
     "algo", cll::desc("Choose an algorithm (default value auto):"),
@@ -96,7 +97,8 @@ static cll::opt<Algo> algo(
                 clEnumVal(serBellmanFord, "serBellmanFord"),
                 clEnumVal(topoTile, "topoTile"),
                 clEnumVal(AutoAlgo, "auto: choose among the algorithms automatically"),
-                clEnumVal(topoOmp, "topoOmp")),
+                clEnumVal(topoOmp, "topoOmp"),
+                clEnumVal(dataDriven, "dataDriven")),
     cll::init(AutoAlgo));
 
 //! [withnumaalloc]
@@ -567,6 +569,38 @@ void BellmanFordAlgo(Graph& graph, const GNode& source) {
   galois::runtime::reportStat_Single("SSSP-BellmanFord", "rounds", rounds);
 }
 
+void dataDrivenAlgo(Graph& graph, const GNode& source) {
+
+  galois::InsertBag<GNode> activeNodes;
+  galois::do_all(
+      galois::iterate(graph), [&](const GNode& src) { activeNodes.push(src); },
+      galois::no_stats());
+
+  graph.getData(source) = 0;
+
+//  typedef galois::worklists::PerSocketChunkFIFO<CHUNK_SIZE> WL;
+//   typedef galois::worklists::LocalQueue<PSchunk> WL;
+   typedef galois::worklists::BulkSynchronous<> WL;
+  //
+  galois::for_each(
+      galois::iterate(activeNodes),
+      [&](const GNode& n, auto& ctx) {
+        const auto& sdata = graph.getData(n);
+
+        for (auto e : graph.edges(n)) {
+          const auto newDist = sdata + graph.getEdgeData(e);
+          auto dst           = graph.getEdgeDst(e);
+          auto& ddata        = graph.getData(dst);
+          auto old = galois::atomicMin(ddata, newDist);
+          if (old > newDist) {
+            ctx.push(dst);
+          }
+        }
+      },
+      galois::loopname("Update"), galois::disable_conflict_detection(),
+      galois::no_stats(), galois::wl<WL>());
+}
+
 int main(int argc, char** argv) {
   galois::SharedMemSys G;
   LonestarStart(argc, argv, name, desc, url, &inputFile);
@@ -684,7 +718,9 @@ int main(int argc, char** argv) {
     deltaStepAlgo<UpdateRequest, OBIM_Barrier>(graph, source, ReqPushWrap(),
                                                OutEdgeRangeFn{graph});
     break;
-
+  case dataDriven:
+    dataDrivenAlgo(graph, source);
+    break;
   default:
     std::abort();
   }

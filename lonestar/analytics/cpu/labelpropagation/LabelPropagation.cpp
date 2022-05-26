@@ -270,14 +270,19 @@ void LabelPropagationAsync(Graph& graph) {
 }
 
 void LabelPropagationSchedule(Graph& graph) {
-  unsigned int iterations = 0;
-  galois::GAccumulator<float> diff;
-  typedef galois::worklists::ChunkFIFO<CHUNK_SIZE> WL;
 
-  while (true) {
+  typedef galois::worklists::PerSocketChunkFIFO<CHUNK_SIZE> WL;
+
+  galois::InsertBag<GNode> activeNodes;
+
+  galois::do_all(
+      galois::iterate(graph), [&](const GNode& src) {
+        activeNodes.push(src);
+      }, galois::no_stats());
+
     // update label and compute difference
     galois::for_each(
-        galois::iterate(graph),
+        galois::iterate(activeNodes),
         [&](const GNode& src, auto& ctx) {
           std::vector<size_t> count(labels.size() + 1, 0);
           size_t maxCount = 0ul;
@@ -303,24 +308,17 @@ void LabelPropagationSchedule(Graph& graph) {
             if(std::find(candidateLabel.begin(), candidateLabel.end(), srcLabelId) == candidateLabel.end()) {
               NodeType maxCountLabel = candidateLabel[std::rand() % candidateLabel.size()];
               srcLabelId = maxCountLabel;
-              diff += 1;
+
+              for (auto e : graph.edges(src)) {
+                GNode dest = graph.getEdgeDst(e);
+                ctx.push(dest);
+              }
             }
           }
         },
-        galois::no_stats(), galois::disable_conflict_detection(), galois::no_pushes(),
+        galois::disable_conflict_detection(),
         galois::wl<WL>(), galois::loopname("UpdateLabel"));
 
-
-    std::cout << "iterations=" << iterations << " diff=" << diff.reduce() << std::endl;
-
-    if (iterations >= maxIterations || diff.reduce() < tolerance) {
-      break;
-    }
-
-    iterations++;
-    diff.reset();
-  } ///< End while(true).
-  galois::runtime::reportStat_Single("LabelPropagationSchedule", "Rounds", iterations);
 }
 
 void LabelPropagationSerial(Graph& graph) {

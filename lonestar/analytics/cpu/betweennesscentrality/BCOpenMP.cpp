@@ -104,7 +104,7 @@ void run() {
         // avoid race writing
         omp_set_lock(&bc_locks[w]);
         bc_vec[w] += delta_vec[w];
-        omp_set_lock(&bc_locks[w]);
+        omp_unset_lock(&bc_locks[w]);
       }
     }
 
@@ -265,6 +265,7 @@ int main(int argc, char** argv) {
   // validate the result
   sanity();
 
+  destroy();
   // printBCcertificate();
 
 }

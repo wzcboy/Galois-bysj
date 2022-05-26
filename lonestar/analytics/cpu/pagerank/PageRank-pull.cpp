@@ -31,11 +31,12 @@
 const char* desc =
     "Computes page ranks a la Page and Brin. This is a pull-style algorithm.";
 
-enum Algo { Topo = 0, Residual, TopoSchedule, SerTopo, TopoPriority };
+enum Algo { Topo = 0, Residual, SerResidual, TopoSchedule, SerTopo, TopoPriority };
 
 static cll::opt<Algo> algo("algo", cll::desc("Choose an algorithm:"),
                            cll::values(clEnumVal(Topo, "Topological"),
                                        clEnumVal(Residual, "Residual"),
+                                       clEnumVal(SerResidual, "SerResidual"),
                                        clEnumVal(TopoSchedule, "TopoSchedule"),
                                        clEnumVal(SerTopo, "SerTopo"),
                                        clEnumVal(TopoPriority, "TopoPriority")),
@@ -190,6 +191,66 @@ void computePRResidual(Graph& graph, DeltaArray& delta,
     accum.reset();
   } ///< End while(true).
     //! [scalarreduction]
+
+  galois::runtime::reportStat_Single("PageRank", "Rounds", iterations);
+
+  if (iterations >= maxIterations) {
+    std::cerr << "ERROR: failed to converge in " << iterations
+              << " iterations\n";
+  }
+
+}
+
+void serComputePRResidual(Graph& graph, DeltaArray& delta,
+                       ResidualArray& residual) {
+  unsigned int iterations = 0;
+  unsigned int accum = 0;
+  galois::StdForEach loop;
+
+  while (true) {
+    loop(
+        galois::iterate(graph),
+        [&](const GNode& src) {
+          auto& sdata = graph.getData(src);
+          delta[src]  = 0;
+
+          //! Only the residual higher than tolerance will be reflected
+          //! to the pagerank.
+          if (residual[src] > tolerance) {
+            PRTy oldResidual = residual[src];
+            residual[src]    = 0.0;
+            sdata.value += oldResidual;
+            if (sdata.nout > 0) {
+              delta[src] = oldResidual * ALPHA / sdata.nout;
+              accum += 1;
+            }
+          }
+        },
+        galois::no_stats(), galois::loopname("PageRank_delta"));
+
+    loop(
+        galois::iterate(graph),
+        [&](const GNode& src) {
+          float sum = 0;
+          for (auto nbr : graph.edges(src)) {
+            GNode dst = graph.getEdgeDst(nbr);
+            if (delta[dst] > 0) {
+              sum += delta[dst];
+            }
+          }
+          if (sum > 0) {
+            residual[src] = sum;
+          }
+        },
+        galois::loopname("PageRank-serial-Residual"));
+
+
+    iterations++;
+    if (iterations >= maxIterations || !accum) {
+      break;
+    }
+    accum = 0;
+  } ///< End while(true).
 
   galois::runtime::reportStat_Single("PageRank", "Rounds", iterations);
 
@@ -492,6 +553,21 @@ void prResidual(Graph& graph) {
   execTime.stop();
 }
 
+void prSerResidual(Graph& graph) {
+  DeltaArray delta;
+  delta.allocateInterleaved(graph.size());
+  ResidualArray residual;
+  residual.allocateInterleaved(graph.size());
+
+  initNodeDataResidual(graph, delta, residual);
+  computeOutDeg(graph);
+
+  galois::StatTimer execTime("Timer_0");
+  execTime.start();
+  serComputePRResidual(graph, delta, residual);
+  execTime.stop();
+}
+
 void prTopoSchedule(Graph& graph) {
   initNodeDataTopological(graph);
   computeOutDeg(graph);
@@ -570,6 +646,11 @@ int main(int argc, char** argv) {
     std::cout << "Running Pull Residual version, tolerance:" << tolerance
               << ", maxIterations:" << maxIterations << "\n";
     prResidual(transposeGraph);
+    break;
+  case SerResidual:
+    std::cout << "Running Pull serial Residual version, tolerance:" << tolerance
+              << ", maxIterations:" << maxIterations << "\n";
+    prSerResidual(transposeGraph);
     break;
   case TopoSchedule:
     std::cout << "Running Pull Topological Schedule version, tolerance:" << tolerance

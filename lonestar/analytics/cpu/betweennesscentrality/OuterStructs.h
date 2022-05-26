@@ -135,7 +135,7 @@ public:
 
   template <typename Cont>
   void runBySchedule(const Cont& v) {
-    typedef galois::worklists::ChunkFIFO<64> WL;
+    typedef galois::worklists::FIFO<> WL;
     // Each thread works on an individual source node
     galois::for_each(
         galois::iterate(v),
