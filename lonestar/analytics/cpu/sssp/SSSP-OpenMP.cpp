@@ -164,7 +164,6 @@ void readGraphFile(const std::string& filePath) {
     }
     edges[start].push_back({end, weight});
   }
-  std::cout << "edges[src].size=" << edges[src].size() << "\n";
   file.close();
 }
 

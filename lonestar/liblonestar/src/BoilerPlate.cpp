@@ -71,18 +71,18 @@ void LonestarStart(int argc, char** argv, const char* app, const char* desc,
   galois::runtime::setStatFile(statFile);
 
   LonestarPrintVersion(llvm::outs());
-  llvm::outs() << "Copyright (C) " << galois::getCopyrightYear()
-               << " The University of Texas at Austin\n";
-  llvm::outs() << "http://iss.ices.utexas.edu/galois/\n\n";
+//  llvm::outs() << "Copyright (C) " << galois::getCopyrightYear()
+//               << " The University of Texas at Austin\n";
+//  llvm::outs() << "http://iss.ices.utexas.edu/galois/\n\n";
   llvm::outs() << "application: " << (app ? app : "unspecified") << "\n";
   if (desc) {
     llvm::outs() << desc << "\n";
   }
   if (url) {
-    llvm::outs() << "http://iss.ices.utexas.edu/?p=projects/galois/benchmarks/"
-                 << url << "\n";
+//    llvm::outs() << "http://iss.ices.utexas.edu/?p=projects/galois/benchmarks/"
+//                 << url << "\n";
   }
-  llvm::outs() << "\n";
+//  llvm::outs() << "\n";
   llvm::outs().flush();
 
   std::ostringstream cmdout;
